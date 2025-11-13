@@ -1,45 +1,58 @@
 import os
 import sys
 import json
+import boto3
+import urllib3 # Added for warning suppression
 from pathlib import Path
 from typing import List, Dict, Any
 
 # ==========================================
-# IMPORTS (Minimal Dependencies)
+# IMPORTS
 # ==========================================
 try:
-    # Core imports (These are standard across all modern versions)
     from langchain_core.tools import tool
     from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage, BaseMessage
-    from langchain_core.prompts import ChatPromptTemplate
-    
-    # AWS Bedrock Import
     from langchain_aws import ChatBedrock
+    from dotenv import load_dotenv
+    load_dotenv()
 except ImportError as e:
-    print("\nCRITICAL IMPORT ERROR:")
-    print(f"Could not import required modules: {e}")
-    print("Please ensure you have installed:")
-    print("pip install -U langchain-core langchain-aws boto3")
+    print(f"Import Error: {e}")
     sys.exit(1)
 
 # ==========================================
-# CONFIGURATION & SAFETY
+# CONFIGURATION
 # ==========================================
 WORKSPACE_DIR = Path(os.getcwd()) / "agent_workspace"
-
 if not WORKSPACE_DIR.exists():
     os.makedirs(WORKSPACE_DIR)
-    print(f"Created workspace directory at: {WORKSPACE_DIR}")
 
 def validate_path(file_path: str) -> Path:
-    """Security check: Ensures path is inside workspace."""
     target_path = (WORKSPACE_DIR / file_path).resolve()
-    try:
-        if WORKSPACE_DIR.resolve() not in target_path.parents and WORKSPACE_DIR.resolve() != target_path:
-            raise ValueError(f"Access denied: Path '{file_path}' is outside the sandbox.")
-    except Exception as e:
-        raise ValueError(f"Invalid path: {e}")
+    if WORKSPACE_DIR.resolve() not in target_path.parents and WORKSPACE_DIR.resolve() != target_path:
+        raise ValueError("Access denied: Path is outside the sandbox.")
     return target_path
+
+# ==========================================
+# 1. YOUR CUSTOM CLIENT FUNCTION
+# ==========================================
+def initialize_bedrock_client():
+    """
+    Put your specific connection logic here (from your screenshot).
+    """
+    region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    
+    print(f"Initializing custom Bedrock client in {region}...")
+    
+    # --- ADDED: DISABLE SSL VERIFICATION ---
+    # Suppress the "InsecureRequestWarning" that appears when verify=False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    client = boto3.client(
+        "bedrock-runtime", 
+        region_name=region,
+        verify=False  # <--- THIS DISABLES SSL CHECKING
+    )
+    return client
 
 # ==========================================
 # TOOLS
@@ -52,14 +65,8 @@ def list_directory(sub_path: str = ".") -> str:
         if not safe_path.exists(): return "Directory does not exist."
         items = os.listdir(safe_path)
         if not items: return "Directory is empty."
-        
-        result = []
-        for item in items:
-            full_item = safe_path / item
-            if full_item.is_dir(): result.append(f"[DIR]  {item}")
-            else: result.append(f"[FILE] {item}")
-        return "\n".join(result)
-    except Exception as e: return f"Error: {str(e)}"
+        return "\n".join([f"[{'DIR' if (safe_path/i).is_dir() else 'FILE'}] {i}" for i in items])
+    except Exception as e: return f"Error: {e}"
 
 @tool
 def create_directory(directory_name: str) -> str:
@@ -68,19 +75,18 @@ def create_directory(directory_name: str) -> str:
         safe_path = validate_path(directory_name)
         os.makedirs(safe_path, exist_ok=True)
         return f"Created directory: {directory_name}"
-    except Exception as e: return f"Error: {str(e)}"
+    except Exception as e: return f"Error: {e}"
 
 @tool
 def write_file(file_path: str, content: str) -> str:
-    """Write content to a file (overwrites if exists)."""
+    """Write content to a file."""
     try:
         safe_path = validate_path(file_path)
-        if not safe_path.parent.exists():
-            return f"Error: Parent directory for '{file_path}' does not exist."
+        if not safe_path.parent.exists(): return "Error: Parent directory missing."
         with open(safe_path, "w", encoding="utf-8") as f:
             f.write(content)
         return f"Successfully wrote to {file_path}"
-    except Exception as e: return f"Error: {str(e)}"
+    except Exception as e: return f"Error: {e}"
 
 @tool
 def read_file(file_path: str) -> str:
@@ -90,127 +96,68 @@ def read_file(file_path: str) -> str:
         if not safe_path.exists(): return "Error: File does not exist."
         with open(safe_path, "r", encoding="utf-8") as f:
             return f.read()
-    except Exception as e: return f"Error: {str(e)}"
+    except Exception as e: return f"Error: {e}"
 
 # ==========================================
-# CUSTOM AGENT LOOP (Replaces AgentExecutor)
+# AGENT LOOP
 # ==========================================
 def simple_agent_loop(llm_with_tools, user_input: str, chat_history: List[BaseMessage], tools_map: Dict):
-    """
-    A manual loop that handles the LLM's thought process and tool execution.
-    This replaces AgentExecutor and avoids import errors.
-    """
     print("  Thinking...", end="\r")
-    
-    # 1. Add user message to history
     current_messages = list(chat_history) + [HumanMessage(content=user_input)]
     
-    # Maximum turns to prevent infinite loops
-    max_turns = 5
-    
-    for _ in range(max_turns):
-        # 2. Invoke LLM
-        response = llm_with_tools.invoke(current_messages)
+    for _ in range(5): # Max 5 turns
+        try:
+            response = llm_with_tools.invoke(current_messages)
+        except Exception as e:
+            return f"API Error: {e}", current_messages
+
         current_messages.append(response)
         
-        # 3. Check if the LLM wants to call tools
         if response.tool_calls:
-            print(f"  > Agent wants to use tools: {[t['name'] for t in response.tool_calls]}")
-            
-            # Execute each tool requested
+            print(f"  > Tools: {[t['name'] for t in response.tool_calls]}")
             for tool_call in response.tool_calls:
-                tool_name = tool_call['name']
-                tool_args = tool_call['args']
-                tool_id = tool_call['id']
-                
-                if tool_name in tools_map:
-                    # Run the tool
-                    print(f"    Executing {tool_name}...")
-                    tool_func = tools_map[tool_name]
-                    try:
-                        tool_output = tool_func.invoke(tool_args)
-                    except Exception as e:
-                        tool_output = f"Tool Execution Error: {e}"
-                    
-                    # Add result back to messages
-                    current_messages.append(ToolMessage(
-                        content=str(tool_output),
-                        tool_call_id=tool_id,
-                        name=tool_name
-                    ))
+                if tool_call['name'] in tools_map:
+                    res = tools_map[tool_call['name']].invoke(tool_call['args'])
+                    current_messages.append(ToolMessage(content=str(res), tool_call_id=tool_call['id'], name=tool_call['name']))
                 else:
-                    current_messages.append(ToolMessage(
-                        content="Error: Tool not found",
-                        tool_call_id=tool_id,
-                        name=tool_name
-                    ))
-            # Loop continues to let LLM see the tool output
+                    current_messages.append(ToolMessage(content="Tool not found", tool_call_id=tool_call['id'], name=tool_call['name']))
         else:
-            # No tools called; this is the final answer
             return response.content, current_messages
 
-    return "I reached the limit of tool calls without a final answer.", current_messages
+    return "Limit reached.", current_messages
 
 # ==========================================
-# MAIN ENTRY POINT
+# MAIN
 # ==========================================
 def run_agent():
-    if "AWS_PROFILE" not in os.environ and "AWS_ACCESS_KEY_ID" not in os.environ:
-        print("Tip: Ensure AWS credentials are set.")
-
     try:
-        # 1. Initialize LLM
+        # 1. Use YOUR custom client
+        custom_client = initialize_bedrock_client()
+        
+        # 2. Inject it into LangChain
         llm = ChatBedrock(
+            client=custom_client,  # <--- THIS CONNECTS YOUR LOGIC TO LANGCHAIN
             model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",
             model_kwargs={"temperature": 0}
         )
 
-        # 2. Prepare Tools
+        # 3. Setup Tools
         tools = [list_directory, create_directory, write_file, read_file]
         tools_map = {t.name: t for t in tools}
-        
-        # 3. Bind Tools to LLM
         llm_with_tools = llm.bind_tools(tools)
 
-        # 4. System Prompt
-        system_prompt = (
-            "You are an expert coding assistant. You operate in a sandbox. "
-            "You can [list_directory, create_directory, write_file, read_file]. "
-            "To edit files: Read first, then Write full content. "
-            "Always check if directory exists before writing."
-        )
+        chat_history = [SystemMessage(content="You are a file system agent. You operate in a sandbox.")]
         
-        # History stores the conversation context
-        chat_history = [SystemMessage(content=system_prompt)]
-
-        print(f"--- AI File System Agent (Custom Loop) ---")
-        print(f"Working Directory: {WORKSPACE_DIR}")
-        print("Type 'exit' to quit.")
-
+        print(f"--- AI Agent Started ---")
         while True:
             user_input = input("\nUser: ")
-            if user_input.lower() in ["exit", "quit"]:
-                break
+            if user_input.lower() in ["exit", "quit"]: break
+            
+            ans, chat_history = simple_agent_loop(llm_with_tools, user_input, chat_history, tools_map)
+            print(f"Agent: {ans}")
 
-            try:
-                # Run our custom loop
-                answer, updated_history = simple_agent_loop(
-                    llm_with_tools, 
-                    user_input, 
-                    chat_history, 
-                    tools_map
-                )
-                
-                print(f"Agent: {answer}")
-                
-                # Update main history (keep context growing)
-                chat_history = updated_history
-                
-            except Exception as e:
-                print(f"An error occurred: {e}")
-
-    except Exception as main_e:
-        print(f"Startup Error: {main_e}")
+    except Exception as e:
+        print(f"Startup Error: {e}")
 
 if __name__ == "__main__":
     run_agent()
