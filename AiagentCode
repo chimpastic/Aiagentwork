@@ -9,6 +9,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
+# Changed import from Google to AWS
+from langchain_aws import ChatBedrock
 
 # ==========================================
 # CONFIGURATION & SAFETY
@@ -134,15 +136,18 @@ def read_file(file_path: str) -> str:
 # ==========================================
 
 def run_agent():
-    # 1. Setup API Key (Ensure you have this in your environment or paste here)
-    # os.environ["GOOGLE_API_KEY"] = "YOUR_KEY_HERE"
-    if "GOOGLE_API_KEY" not in os.environ:
-        print("Please set your GOOGLE_API_KEY environment variable.")
-        return
+    # 1. Setup AWS Credentials
+    # Ensure AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_DEFAULT_REGION are set
+    # or that you have run 'aws configure' in your terminal.
+    if "AWS_PROFILE" not in os.environ and "AWS_ACCESS_KEY_ID" not in os.environ:
+        print("Tip: Ensure AWS credentials are set (environment variables or ~/.aws/credentials).")
 
     # 2. Initialize the LLM
-    # We use Gemini Pro (flash is faster/cheaper)
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+    # Using Claude 3.5 Sonnet on Bedrock
+    llm = ChatBedrock(
+        model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        model_kwargs={"temperature": 0}
+    )
 
     # 3. Define the toolkit
     tools = [list_directory, create_directory, write_file, read_file]
@@ -167,7 +172,7 @@ def run_agent():
     agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
     # 6. Interactive Loop
-    print(f"--- AI File System Agent Started ---")
+    print(f"--- AI File System Agent Started (Claude 3.5 Sonnet) ---")
     print(f"Working Directory: {WORKSPACE_DIR}")
     print("Type 'exit' to quit.")
 
@@ -195,4 +200,5 @@ def run_agent():
 
 if __name__ == "__main__":
     run_agent()
+
 
