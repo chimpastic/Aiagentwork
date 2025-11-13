@@ -1,0 +1,198 @@
+import os
+import shutil
+from pathlib import Path
+from typing import Optional
+
+# LangChain Imports
+from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+
+# ==========================================
+# CONFIGURATION & SAFETY
+# ==========================================
+
+# We define a 'workspace' directory. The agent is trapped here.
+# It cannot access anything above this folder.
+WORKSPACE_DIR = Path(os.getcwd()) / "agent_workspace"
+
+# Create the workspace if it doesn't exist
+if not WORKSPACE_DIR.exists():
+    os.makedirs(WORKSPACE_DIR)
+    print(f"Created workspace directory at: {WORKSPACE_DIR}")
+
+def validate_path(file_path: str) -> Path:
+    """
+    Security check: Ensures the path is inside the WORKSPACE_DIR.
+    Prevents directory traversal attacks (e.g., ../../etc/passwd).
+    """
+    # Resolve the full absolute path
+    target_path = (WORKSPACE_DIR / file_path).resolve()
+    
+    # Check if the target path starts with the workspace path
+    # commonpath raises an error if paths are on different drives (Windows) 
+    # or checks prefix correctness
+    try:
+        if WORKSPACE_DIR.resolve() not in target_path.parents and WORKSPACE_DIR.resolve() != target_path:
+            raise ValueError(f"Access denied: Path '{file_path}' is outside the sandbox.")
+    except Exception as e:
+        raise ValueError(f"Invalid path: {e}")
+        
+    return target_path
+
+# ==========================================
+# TOOLS
+# ==========================================
+
+@tool
+def list_directory(sub_path: str = ".") -> str:
+    """
+    List all files and folders in the current directory or a subdirectory.
+    Args:
+        sub_path: The subdirectory to list (default is root of workspace).
+    """
+    try:
+        safe_path = validate_path(sub_path)
+        if not safe_path.exists():
+            return "Directory does not exist."
+        
+        items = os.listdir(safe_path)
+        if not items:
+            return "Directory is empty."
+            
+        # Add indicators for folders vs files
+        result = []
+        for item in items:
+            full_item = safe_path / item
+            if full_item.is_dir():
+                result.append(f"[DIR]  {item}")
+            else:
+                result.append(f"[FILE] {item}")
+        
+        return "\n".join(result)
+    except Exception as e:
+        return f"Error listing directory: {str(e)}"
+
+@tool
+def create_directory(directory_name: str) -> str:
+    """
+    Create a new directory (and parent directories if needed).
+    Args:
+        directory_name: The path of the directory to create.
+    """
+    try:
+        safe_path = validate_path(directory_name)
+        os.makedirs(safe_path, exist_ok=True)
+        return f"Successfully created directory: {directory_name}"
+    except Exception as e:
+        return f"Error creating directory: {str(e)}"
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """
+    Write content to a file. If the file exists, it will be overwritten.
+    Used for creating code files or editing them.
+    Args:
+        file_path: The name/path of the file.
+        content: The text content to write.
+    """
+    try:
+        safe_path = validate_path(file_path)
+        
+        # Ensure parent directory exists
+        if not safe_path.parent.exists():
+            return f"Error: Directory for '{file_path}' does not exist. Create directory first."
+
+        with open(safe_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        return f"Successfully wrote to {file_path}"
+    except Exception as e:
+        return f"Error writing file: {str(e)}"
+
+@tool
+def read_file(file_path: str) -> str:
+    """
+    Read the contents of a file. Use this before editing a file to see its content.
+    Args:
+        file_path: The path of the file to read.
+    """
+    try:
+        safe_path = validate_path(file_path)
+        if not safe_path.exists():
+            return "Error: File does not exist."
+            
+        with open(safe_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+# ==========================================
+# AGENT SETUP
+# ==========================================
+
+def run_agent():
+    # 1. Setup API Key (Ensure you have this in your environment or paste here)
+    # os.environ["GOOGLE_API_KEY"] = "YOUR_KEY_HERE"
+    if "GOOGLE_API_KEY" not in os.environ:
+        print("Please set your GOOGLE_API_KEY environment variable.")
+        return
+
+    # 2. Initialize the LLM
+    # We use Gemini Pro (flash is faster/cheaper)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+
+    # 3. Define the toolkit
+    tools = [list_directory, create_directory, write_file, read_file]
+
+    # 4. Create the Prompt
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are an expert coding assistant capable of file operations. "
+         "You operate inside a sandboxed workspace. "
+         "You can create files, read them, and create directories. "
+         "To edit a file, read it first, apply changes to the text, and then overwrite it using write_file. "
+         "Always check if a directory exists before trying to write a file into it. "
+         "If asked to create code, verify it works by reviewing your own code logic."
+        ),
+        ("placeholder", "{chat_history}"),
+        ("human", "{input}"),
+        ("placeholder", "{agent_scratchpad}"),
+    ])
+
+    # 5. Construct the Agent
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+    # 6. Interactive Loop
+    print(f"--- AI File System Agent Started ---")
+    print(f"Working Directory: {WORKSPACE_DIR}")
+    print("Type 'exit' to quit.")
+
+    chat_history = []
+
+    while True:
+        user_input = input("\nUser: ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
+
+        try:
+            response = agent_executor.invoke({
+                "input": user_input,
+                "chat_history": chat_history
+            })
+            
+            print(f"Agent: {response['output']}")
+            
+            # Keep track of history for context (basic implementation)
+            chat_history.append(HumanMessage(content=user_input))
+            chat_history.append(response['output'])
+            
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    run_agent()
+
