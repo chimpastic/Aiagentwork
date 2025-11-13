@@ -1,10 +1,12 @@
 import os
 import sys
 import json
+import shutil
 import boto3
-import urllib3 # Added for warning suppression
+import urllib3
 from pathlib import Path
 from typing import List, Dict, Any
+from botocore.exceptions import ClientError, NoCredentialsError
 
 # ==========================================
 # IMPORTS
@@ -17,147 +19,214 @@ try:
     load_dotenv()
 except ImportError as e:
     print(f"Import Error: {e}")
+    print("Please run: pip install langchain-aws langchain-core boto3 python-dotenv")
     sys.exit(1)
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION & SANDBOX
 # ==========================================
 WORKSPACE_DIR = Path(os.getcwd()) / "agent_workspace"
 if not WORKSPACE_DIR.exists():
     os.makedirs(WORKSPACE_DIR)
 
 def validate_path(file_path: str) -> Path:
+    """Enforces that all file operations stay inside the workspace."""
+    if file_path == ".": return WORKSPACE_DIR
     target_path = (WORKSPACE_DIR / file_path).resolve()
     if WORKSPACE_DIR.resolve() not in target_path.parents and WORKSPACE_DIR.resolve() != target_path:
-        raise ValueError("Access denied: Path is outside the sandbox.")
+        raise ValueError(f"Security Alert: Access denied to {file_path}. Stay inside the sandbox.")
     return target_path
 
 # ==========================================
-# 1. YOUR CUSTOM CLIENT FUNCTION
+# CUSTOM BEDROCK CLIENT
 # ==========================================
 def initialize_bedrock_client():
-    """
-    Put your specific connection logic here (from your screenshot).
-    """
+    """Initializes Bedrock with SSL verification disabled AND checks credentials."""
     region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     
-    print(f"Initializing custom Bedrock client in {region}...")
-    
-    # --- ADDED: DISABLE SSL VERIFICATION ---
-    # Suppress the "InsecureRequestWarning" that appears when verify=False
+    # Disable warning spam
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
-    client = boto3.client(
+    # 1. Create a session
+    session = boto3.Session()
+    
+    # 2. Validate Credentials Immediately
+    try:
+        sts = session.client("sts", verify=False)
+        identity = sts.get_caller_identity()
+        print(f"✅ Authenticated as: {identity['Arn']}")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ExpiredToken':
+            print("\n❌ ERROR: Your AWS Session Token has EXPIRED.")
+            print("   Please refresh your credentials in the .env file or run 'aws sso login'.")
+            sys.exit(1)
+        else:
+            print(f"\n❌ AWS Auth Error: {e}")
+            sys.exit(1)
+    except NoCredentialsError:
+        print("\n❌ ERROR: No AWS credentials found.")
+        print("   Check your .env file or AWS_PROFILE.")
+        sys.exit(1)
+
+    # 3. Return the Bedrock client
+    print(f"Initializing Bedrock Client ({region})...")
+    return session.client(
         "bedrock-runtime", 
         region_name=region,
-        verify=False  # <--- THIS DISABLES SSL CHECKING
+        verify=False
     )
-    return client
 
 # ==========================================
 # TOOLS
 # ==========================================
 @tool
-def list_directory(sub_path: str = ".") -> str:
-    """List all files and folders in the current directory."""
+def list_directory(path: str = ".") -> str:
+    """List files and folders. Use '.' for current directory."""
     try:
-        safe_path = validate_path(sub_path)
-        if not safe_path.exists(): return "Directory does not exist."
+        safe_path = validate_path(path)
+        if not safe_path.exists(): return "Error: Path does not exist."
         items = os.listdir(safe_path)
         if not items: return "Directory is empty."
-        return "\n".join([f"[{'DIR' if (safe_path/i).is_dir() else 'FILE'}] {i}" for i in items])
+        result = []
+        for item in items:
+            full_path = safe_path / item
+            if full_path.is_dir(): result.append(f"{item}/")
+            else: result.append(item)
+        return "\n".join(result)
     except Exception as e: return f"Error: {e}"
 
 @tool
-def create_directory(directory_name: str) -> str:
+def create_directory(path: str) -> str:
     """Create a new directory."""
     try:
-        safe_path = validate_path(directory_name)
+        safe_path = validate_path(path)
         os.makedirs(safe_path, exist_ok=True)
-        return f"Created directory: {directory_name}"
+        return f"Created directory: {path}"
     except Exception as e: return f"Error: {e}"
 
 @tool
-def write_file(file_path: str, content: str) -> str:
-    """Write content to a file."""
+def write_file(path: str, content: str) -> str:
+    """Create or Overwrite a file with code."""
     try:
-        safe_path = validate_path(file_path)
-        if not safe_path.parent.exists(): return "Error: Parent directory missing."
+        safe_path = validate_path(path)
+        if not safe_path.parent.exists():
+            return f"Error: Directory {safe_path.parent.name} does not exist. Create it first."
         with open(safe_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"Successfully wrote to {file_path}"
+        return f"Successfully wrote code to {path}"
     except Exception as e: return f"Error: {e}"
 
 @tool
-def read_file(file_path: str) -> str:
-    """Read the contents of a file."""
+def read_file(path: str) -> str:
+    """Read the code inside a file."""
     try:
-        safe_path = validate_path(file_path)
-        if not safe_path.exists(): return "Error: File does not exist."
+        safe_path = validate_path(path)
+        if not safe_path.exists(): return "Error: File not found."
         with open(safe_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e: return f"Error: {e}"
 
+@tool
+def move_file(source: str, destination: str) -> str:
+    """Move or Rename a file/folder."""
+    try:
+        src_path = validate_path(source)
+        dst_path = validate_path(destination)
+        if not src_path.exists(): return f"Error: Source {source} not found."
+        shutil.move(str(src_path), str(dst_path))
+        return f"Moved {source} to {destination}"
+    except Exception as e: return f"Error: {e}"
+
 # ==========================================
-# AGENT LOOP
+# AGENT LOGIC
 # ==========================================
-def simple_agent_loop(llm_with_tools, user_input: str, chat_history: List[BaseMessage], tools_map: Dict):
+def simple_agent_loop(llm, user_input, chat_history, tools_map):
     print("  Thinking...", end="\r")
     current_messages = list(chat_history) + [HumanMessage(content=user_input)]
+    max_steps = 10
     
-    for _ in range(5): # Max 5 turns
+    for i in range(max_steps):
         try:
-            response = llm_with_tools.invoke(current_messages)
+            response = llm.invoke(current_messages)
         except Exception as e:
-            return f"API Error: {e}", current_messages
+            return f"Bedrock API Error: {e}", current_messages
 
         current_messages.append(response)
         
-        if response.tool_calls:
-            print(f"  > Tools: {[t['name'] for t in response.tool_calls]}")
-            for tool_call in response.tool_calls:
-                if tool_call['name'] in tools_map:
-                    res = tools_map[tool_call['name']].invoke(tool_call['args'])
-                    current_messages.append(ToolMessage(content=str(res), tool_call_id=tool_call['id'], name=tool_call['name']))
-                else:
-                    current_messages.append(ToolMessage(content="Tool not found", tool_call_id=tool_call['id'], name=tool_call['name']))
-        else:
+        if not response.tool_calls:
             return response.content, current_messages
+        
+        print(f"  [Step {i+1}] Executing: {[t['name'] for t in response.tool_calls]}")
+        
+        for tool_call in response.tool_calls:
+            t_name = tool_call['name']
+            t_args = tool_call['args']
+            t_id = tool_call['id']
+            
+            if t_name in tools_map:
+                try:
+                    tool_result = tools_map[t_name].invoke(t_args)
+                except Exception as e:
+                    tool_result = f"Tool execution failed: {e}"
+            else:
+                tool_result = "Error: Tool not found."
 
-    return "Limit reached.", current_messages
+            current_messages.append(ToolMessage(
+                content=str(tool_result),
+                tool_call_id=t_id,
+                name=t_name
+            ))
+
+    return "I reached the maximum number of steps (10) without finishing.", current_messages
 
 # ==========================================
 # MAIN
 # ==========================================
 def run_agent():
     try:
-        # 1. Use YOUR custom client
-        custom_client = initialize_bedrock_client()
+        # 1. Setup Client & Validate Identity
+        client = initialize_bedrock_client()
         
-        # 2. Inject it into LangChain
+        # 2. Setup LLM
         llm = ChatBedrock(
-            client=custom_client,  # <--- THIS CONNECTS YOUR LOGIC TO LANGCHAIN
+            client=client,
             model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",
-            model_kwargs={"temperature": 0}
+            model_kwargs={"temperature": 0.1}
         )
 
         # 3. Setup Tools
-        tools = [list_directory, create_directory, write_file, read_file]
+        tools = [list_directory, create_directory, write_file, read_file, move_file]
         tools_map = {t.name: t for t in tools}
         llm_with_tools = llm.bind_tools(tools)
 
-        chat_history = [SystemMessage(content="You are a file system agent. You operate in a sandbox.")]
+        chat_history = [SystemMessage(content="""You are an expert Senior Python Developer Agent.
+        Your job is to write code, organize files, and refactor projects inside the workspace.
         
-        print(f"--- AI Agent Started ---")
+        GUIDELINES:
+        1. EXPLORE FIRST: Always run `list_directory` to see what files exist before acting.
+        2. CHECK BEFORE EDITING: Before changing a file, `read_file` to understand the current code.
+        3. CREATE STRUCTURE: If the user asks for a project, use `create_directory` to make folders.
+        4. WRITE COMPLETE CODE: When using `write_file`, provide the FULL file content.
+        5. REFACTORING: Use `move_file` to organize messy directories.
+        """)]
+        
+        print(f"\n--- 🐍 AI Coding Agent Initialized ---")
+        print(f"Sandbox Location: {WORKSPACE_DIR}")
+        
         while True:
             user_input = input("\nUser: ")
             if user_input.lower() in ["exit", "quit"]: break
             
-            ans, chat_history = simple_agent_loop(llm_with_tools, user_input, chat_history, tools_map)
-            print(f"Agent: {ans}")
+            answer, chat_history = simple_agent_loop(
+                llm_with_tools, 
+                user_input, 
+                chat_history, 
+                tools_map
+            )
+            print(f"\nAgent: {answer}")
 
     except Exception as e:
-        print(f"Startup Error: {e}")
+        print(f"Startup Failed: {e}")
 
 if __name__ == "__main__":
     run_agent()
