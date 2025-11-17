@@ -1,60 +1,43 @@
 import os
+import sys
+import argparse  # We'll use this to accept a filename from the user
 from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.table import Table
-# We need qn (qualified name) to check element tag names
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# The create_sample_docx function remains the same.
 def create_sample_docx(filename="sample_document.docx"):
     """
     Creates a sample .docx file with mixed paragraphs and tables for testing.
     """
     print(f"Creating sample file: {filename}...")
     
-    # Create a new document
     doc = Document()
-
-    # Add a title
     doc.add_heading("Document with Mixed Content", level=0)
-
-    # Add a paragraph
     doc.add_paragraph(
         "This is the first paragraph. It appears before any tables. "
         "We want to extract this text first."
     )
-
-    # Add a simple 2x2 table
     doc.add_heading("First Table", level=2)
     table1 = doc.add_table(rows=2, cols=2)
     table1.style = 'Table Grid'
-    # Header row
     table1.cell(0, 0).text = "Header 1"
     table1.cell(0, 1).text = "Header 2"
-    # Data row
     table1.cell(1, 0).text = "Cell (1,0)"
     table1.cell(1, 1).text = "Cell (1,1)"
-
-    # Add another paragraph
     doc.add_paragraph(
         "This second paragraph is located between the two tables. "
         "Its sequence (after the first table and before the second) is important."
     )
-
-    # Add a more complex 3x3 table
     doc.add_heading("Second Table", level=2)
     table2 = doc.add_table(rows=3, cols=3)
     table2.style = 'Table Grid'
     for i in range(3):
         for j in range(3):
             table2.cell(i, j).text = f"Row {i+1}, Col {j+1}"
-
-    # Add a final paragraph
     doc.add_paragraph("This is the final paragraph, appearing after all other content.")
-
-    # Save the document
     doc.save(filename)
     print("Sample file created successfully.")
 
@@ -62,78 +45,102 @@ def create_sample_docx(filename="sample_document.docx"):
 def extract_docx_content(filepath):
     """
     Extracts paragraphs, headings, and tables from a .docx file in sequential order.
-    
-    Args:
-        filepath (str): The path to the .docx file.
-
-    Returns:
-        list: A list of tuples, where each tuple contains:
-              ("paragraph", text)
-              ("heading", text, style_name)
-              ("table", list_of_lists_of_cell_text)
     """
     
-    # Open the .docx file
     doc = Document(filepath)
-    
     full_content = []
 
-    # Iterate through the main body of the document
     for element in doc.element.body:
-        
-        # Check if the element is a paragraph by checking its XML tag name
         if element.tag == qn('w:p'):
-            # Re-hydrate the element into a full Paragraph object
             paragraph = Paragraph(element, doc)
             text = paragraph.text.strip()
-            
-            # Check if the paragraph is a heading
             is_heading = paragraph.style.name.startswith('Heading')
             
-            if text:  # Avoid empty paragraphs
+            if text:
                 if is_heading:
-                    # Save as a 'heading' type
                     full_content.append(("heading", text, paragraph.style.name))
                 else:
-                    # Save as a 'paragraph' type
                     full_content.append(("paragraph", text))
         
-        # Check if the element is a table by checking its XML tag name
         elif element.tag == qn('w:tbl'):
-            # Re-hydrate the element into a full Table object
             table = Table(element, doc)
-            
-            # Extract data from the table
             table_data = []
             for row in table.rows:
                 row_data = []
                 for cell in row.cells:
                     row_data.append(cell.text)
                 table_data.append(row_data)
-                
             full_content.append(("table", table_data))
             
     return full_content
 
-# The main function is updated to handle the new 'heading' type.
+
 def main():
     """
-    Main function to run the demonstration.
+    Main function to run the script.
     """
-    sample_filename = "sample_document.docx"
     
+    # --- Set up the command-line argument parser ---
+    parser = argparse.ArgumentParser(
+        description="Extract sequential content (paragraphs, headings, tables) from a .docx file."
+    )
+    
+    # Add a positional argument for the filename.
+    # nargs='?' makes it optional, so we can run with --create-sample alone
+    parser.add_argument(
+        "filename", 
+        nargs='?', 
+        help="The path to the .docx file you want to read."
+    )
+    
+    # Add an optional flag to create our sample file
+    parser.add_argument(
+        "--create-sample", 
+        action="store_true", 
+        help="Create a 'sample_document.docx' file for testing."
+    )
+    
+    args = parser.parse_args()
+    
+    # --- Logic for what to do ---
+    
+    # 1. If they just want to create the sample file
+    if args.create_sample:
+        create_sample_docx("sample_document.docx")
+        print("\nSample file 'sample_document.docx' created.")
+        print("You can now run this command to read it:")
+        print("  python docx_extractor.py sample_document.docx")
+        sys.exit(0)
+        
+    # 2. If they didn't provide a filename or --create-sample
+    if not args.filename:
+        parser.print_help()
+        print("\nError: You must provide a filename to read or use --create-sample.")
+        sys.exit(1)
+        
+    filepath = args.filename
+
+    # 3. Validation checks for the provided file
+    if not os.path.exists(filepath):
+        print(f"Error: File not found at '{filepath}'")
+        sys.exit(1)
+        
+    if not filepath.lower().endswith('.docx'):
+        print(f"Error: The file must be a .docx file. Provided: '{filepath}'")
+        sys.exit(1)
+
+    # 4. If all checks pass, try to process the user's file
     try:
-        # 1. Create the sample document
-        create_sample_docx(sample_filename)
+        print(f"--- Extracting content from: {filepath} --- \n")
         
-        print("\n" + "="*30)
-        print("Extracting Content in Sequence...")
-        print("="*30 + "\n")
+        content = extract_docx_content(filepath)
         
-        # 2. Extract the content
-        content = extract_docx_content(sample_filename)
-        
-        # 3. Print the extracted content in order
+        if not content:
+            print("No text content (paragraphs, headings, or tables) was found in this document.")
+            print("NOTE: This script does not extract text from headers, footers, or text boxes.")
+            return
+
+        # Loop through and print the content
         for item in content:
             item_type = item[0]
             
@@ -142,27 +149,20 @@ def main():
                 print(item[1])
             
             elif item_type == "heading":
-                # Print the heading style, e.g., [HEADING 2]
-                print(f"[{item[2].upper()}]")
+                print(f"[{item[2].upper()}]") # e.g., [HEADING 2]
                 print(item[1])
 
             elif item_type == "table":
                 print(f"[TABLE]")
                 table_data = item[1]
                 for row in table_data:
-                    # Format table rows for clearer printing
                     print("  | " + " | ".join(cell.ljust(15) for cell in row) + " |")
             
             print("...\n")
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-    
-    finally:
-        # 4. Clean up the sample file
-        if os.path.exists(sample_filename):
-            os.remove(sample_filename)
-            print(f"\nCleaned up sample file: {sample_filename}")
+        print(f"An error occurred while processing '{filepath}': {e}")
+        print("The file might be corrupted, password-protected, or not a valid .docx file.")
 
 if __name__ == "__main__":
     main()
