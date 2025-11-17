@@ -16,8 +16,7 @@ import pytesseract     # Requires: pip install pytesseract
 
 def extract_info_from_doc(doc_path):
     """
-    Reads a .docx file, extracts text from tables, and uses OCR
-    to extract text from embedded images.
+    Reads a .docx file and extracts text from tables.
     """
     try:
         doc = docx.Document(doc_path)
@@ -38,7 +37,7 @@ def extract_info_from_doc(doc_path):
             row_data = [cell.text.strip() for cell in row.cells]
             print(f"  Row {j + 1}: {' | '.join(row_data)}")
 
-    # 2. Extract Info from Images (using OCR)
+    # 2. Extract Info from Images (OCR)
     print("\n--- Extracting Image Data (OCR) ---")
     
     # Images can be in 'inline_shapes' or 'shapes' (for floating images)
@@ -104,4 +103,5 @@ if __name__ == "__main__":
     print("Script is ready. Please uncomment the lines above and")
     print("replace 'YOUR_DOCUMENT.docx' with the actual file path to run.")
     print("\nReminder: You must install Tesseract-OCR on your system for image text extraction to work.")
+
 
