@@ -61,14 +61,16 @@ def create_sample_docx(filename="sample_document.docx"):
 
 def extract_docx_content(filepath):
     """
-    Extracts paragraphs and tables from a .docx file in sequential order.
+    Extracts paragraphs, headings, and tables from a .docx file in sequential order.
     
     Args:
         filepath (str): The path to the .docx file.
 
     Returns:
         list: A list of tuples, where each tuple contains:
-              ("paragraph", text) or ("table", list_of_lists_of_cell_text)
+              ("paragraph", text)
+              ("heading", text, style_name)
+              ("table", list_of_lists_of_cell_text)
     """
     
     # Open the .docx file
@@ -83,8 +85,18 @@ def extract_docx_content(filepath):
         if element.tag == qn('w:p'):
             # Re-hydrate the element into a full Paragraph object
             paragraph = Paragraph(element, doc)
-            if paragraph.text.strip():  # Avoid empty paragraphs
-                full_content.append(("paragraph", paragraph.text))
+            text = paragraph.text.strip()
+            
+            # Check if the paragraph is a heading
+            is_heading = paragraph.style.name.startswith('Heading')
+            
+            if text:  # Avoid empty paragraphs
+                if is_heading:
+                    # Save as a 'heading' type
+                    full_content.append(("heading", text, paragraph.style.name))
+                else:
+                    # Save as a 'paragraph' type
+                    full_content.append(("paragraph", text))
         
         # Check if the element is a table by checking its XML tag name
         elif element.tag == qn('w:tbl'):
@@ -103,7 +115,7 @@ def extract_docx_content(filepath):
             
     return full_content
 
-# The main function remains the same.
+# The main function is updated to handle the new 'heading' type.
 def main():
     """
     Main function to run the demonstration.
@@ -122,14 +134,22 @@ def main():
         content = extract_docx_content(sample_filename)
         
         # 3. Print the extracted content in order
-        for item_type, item_data in content:
+        for item in content:
+            item_type = item[0]
+            
             if item_type == "paragraph":
                 print(f"[PARAGRAPH]")
-                print(item_data)
+                print(item[1])
             
+            elif item_type == "heading":
+                # Print the heading style, e.g., [HEADING 2]
+                print(f"[{item[2].upper()}]")
+                print(item[1])
+
             elif item_type == "table":
                 print(f"[TABLE]")
-                for row in item_data:
+                table_data = item[1]
+                for row in table_data:
                     # Format table rows for clearer printing
                     print("  | " + " | ".join(cell.ljust(15) for cell in row) + " |")
             
