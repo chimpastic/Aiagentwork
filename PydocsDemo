@@ -75,9 +75,9 @@ def extract_docx_content(filepath):
     full_content = []
 
     # Iterate through the main body of the document
-    # doc._body.inner_content_elements gives us a mix of paragraphs (CT_P)
-    # and tables (CT_Tbl) in the order they appear.
-    for element in doc._body.inner_content_elements:
+    # doc.element.body contains the direct child elements (paragraphs and tables)
+    # in the order they appear in the document.
+    for element in doc.element.body:
         
         # Check if the element is a paragraph
         if isinstance(element, CT_P):
@@ -145,4 +145,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
