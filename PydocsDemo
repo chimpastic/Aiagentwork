@@ -2,6 +2,8 @@ import docx
 import io
 from PIL import Image  # Requires: pip install Pillow
 import pytesseract     # Requires: pip install pytesseract
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 # IMPORTANT: pytesseract is a wrapper for Google's Tesseract-OCR engine.
 # You MUST install Tesseract-OCR on your system for this code to work.
@@ -14,82 +16,50 @@ import pytesseract     # Requires: pip install pytesseract
 # After installing, you might need to tell pytesseract where to find it:
 # Example: pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-def extract_info_from_doc(doc_path):
+def extract_structured_content(doc_path):
     """
-    Reads a .docx file and extracts text from tables.
+    Reads a .docx file and extracts text from paragraphs and tables
+    in the order they appear in the document.
     """
     try:
         doc = docx.Document(doc_path)
     except Exception as e:
         print(f"Error opening document '{doc_path}': {e}")
-        return
+        return []
 
     print(f"--- Processing Document: {doc_path} ---")
 
-    # 1. Extract Info from Tables
-    print("\n--- Extracting Table Data ---")
-    if not doc.tables:
-        print("No tables found in the document.")
-    
-    for i, table in enumerate(doc.tables):
-        print(f"\nTable {i + 1}:")
-        for j, row in enumerate(table.rows):
-            row_data = [cell.text.strip() for cell in row.cells]
-            print(f"  Row {j + 1}: {' | '.join(row_data)}")
+    extracted_data = []
 
-    # 2. Extract Info from Images (OCR)
-    print("\n--- Extracting Image Data (OCR) ---")
-    
-    # Images can be in 'inline_shapes' or 'shapes' (for floating images)
-    # This example focuses on inline images, which are more common.
-    
-    image_count = 0
-    # Access all image parts in the document
-    image_parts = [
-        part for part in doc.part.related_parts.values()
-        if "image" in part.content_type
-    ]
-
-    if not image_parts:
-        print("No images found in the document.")
-        return
-
-    for part in image_parts:
-        image_count += 1
-        print(f"\nProcessing Image {image_count}:")
+    # We iterate through the 'body' which contains paragraphs and tables in order
+    # doc.body.content contains both Paragraph and Table objects
+    for block in doc.body.content:
         
-        # Get image data blob
-        image_data = part.blob
+        # Check if the block is a Paragraph
+        if isinstance(block, Paragraph):
+            text = block.text.strip()
+            if text:  # Only add non-empty paragraphs
+                extracted_data.append({
+                    "type": "paragraph",
+                    "content": text
+                })
         
-        try:
-            # Create a file-like object from the image data
-            image_stream = io.BytesIO(image_data)
+        # Check if the block is a Table
+        elif isinstance(block, Table):
+            table_data = []
+            for row in block.rows:
+                # Extract text from each cell in the row
+                row_data = [cell.text.strip() for cell in row.cells]
+                table_data.append(row_data)
             
-            # Open the image using PIL
-            img = Image.open(image_stream)
-            
-            # Use pytesseract to extract text
-            # lang='eng' specifies English. Use 'jpn' for Japanese, etc.
-            text = pytesseract.image_to_string(img, lang='eng')
-            
-            if text.strip():
-                print("  Extracted Text:")
-                print("  -----------------")
-                print(f"  {text.strip()}")
-                print("  -----------------")
-            else:
-                print("  No text found in this image.")
-                
-        except pytesseract.TesseractNotFoundError:
-            print("\n!!! TESSERACT-OCR NOT FOUND !!!")
-            print("pytesseract Error: The Tesseract-OCR engine is not installed or not in your system's PATH.")
-            print("Please install it from: https://github.com/UB-Mannheim/tesseract/wiki")
-            # Stop the image processing part if Tesseract isn't found
-            break
-        except Exception as e:
-            print(f"  Could not process image: {e}")
+            if table_data:
+                extracted_data.append({
+                    "type": "table",
+                    "content": table_data
+                })
 
     print(f"\n--- End of Processing ---")
+    return extracted_data
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
@@ -98,10 +68,24 @@ if __name__ == "__main__":
     # at least one image that contains readable text.
     
     # doc_to_read = "YOUR_DOCUMENT.docx"
-    # extract_info_from_doc(doc_to_read)
+    # data = extract_structured_content(doc_to_read)
     
     print("Script is ready. Please uncomment the lines above and")
     print("replace 'YOUR_DOCUMENT.docx' with the actual file path to run.")
-    print("\nReminder: You must install Tesseract-OCR on your system for image text extraction to work.")
+    
+    # --- Example of how to print the structured data ---
+    # print("\n--- Extracted Content (in order) ---")
+    # if 'data' in locals():
+    #     for item in data:
+    #         if item['type'] == 'paragraph':
+    #             print("\n[Paragraph]")
+    #             print(item['content'])
+            
+    #         elif item['type'] == 'table':
+    #             print("\n[Table]")
+    #             for row in item['content']:
+    #                 print(f"  {' | '.join(row)}")
+    # else:
+    #     print("\n(Uncomment main execution block to see output here)")
 
 
