@@ -1,0 +1,111 @@
+import sys
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
+# --- 1. REUSE YOUR EXTRACTION LOGIC ---
+def extract_drs_text(filepath):
+    """
+    Extracts text from DOCX to a single string string, preserving 
+    sequence for the LLM context.
+    """
+    full_text = []
+    try:
+        doc = Document(filepath)
+        for block in doc._body._inner_content:
+            if isinstance(block, Paragraph):
+                if block.text.strip():
+                    full_text.append(block.text)
+            elif isinstance(block, Table):
+                # Add a marker so the LLM knows this was a table
+                full_text.append("\n--- DATA TABLE START ---")
+                for row in block.rows:
+                    row_data = [cell.text.replace("\n", " ").strip() for cell in row.cells]
+                    # Format as pipe-separated text for the LLM to understand structure
+                    full_text.append("| " + " | ".join(row_data) + " |")
+                full_text.append("--- DATA TABLE END ---\n")
+        return "\n".join(full_text)
+    except Exception as e:
+        return str(e)
+
+# --- 2. LANGCHAIN SETUP ---
+def generate_test_plan(drs_path):
+    
+    # A. Load the DRS Content
+    print(f"Reading DRS file: {drs_path}...")
+    drs_content = extract_drs_text(drs_path)
+    
+    if not drs_content:
+        print("Error: No content extracted.")
+        return
+
+    # B. Initialize LLM
+    # Make sure you have OPENAI_API_KEY in your environment variables
+    # model_name="gpt-4-turbo" is recommended for large documents/complex logic
+    llm = ChatOpenAI(temperature=0.2, model_name="gpt-4-turbo") 
+
+    # C. Define the Prompt
+    template = """
+    Role: You are a Senior QA Test Lead.
+    
+    Task: Create a Master Test Plan based on the extracted Design Requirement Specification (DRS) below.
+    
+    Instructions:
+    1. Analyze the text and the data tables carefully.
+    2. If a table lists input/output logic, create specific test scenarios for those rows.
+    3. Format the output as a clean Markdown document.
+    
+    --- BEGIN DRS CONTENT ---
+    {drs_content}
+    --- END DRS CONTENT ---
+    
+    Output Structure:
+    1. Introduction & Objectives
+    2. Scope (In-Scope / Out-of-Scope)
+    3. Test Strategy & Approach
+    4. Test Scenarios (Present this as a Markdown Table)
+    5. Risks & Mitigation
+    6. Environment Requirements
+    
+    Generate the Test Plan now:
+    """
+    
+    prompt = PromptTemplate(
+        input_variables=["drs_content"],
+        template=template
+    )
+
+    # D. Create and Run the Chain (New LCEL Syntax)
+    print("Sending to LLM for analysis (this may take a moment)...")
+    chain = prompt | llm
+    
+    response = chain.invoke({"drs_content": drs_content})
+    
+    return response.content
+
+# --- 3. EXECUTION ---
+if __name__ == "__main__":
+    # Replace with your actual file path
+    # If you don't have a file handy, create a dummy docx to test
+    input_file = "My_DRS_Document.docx" 
+    
+    try:
+        test_plan = generate_test_plan(input_file)
+        
+        if test_plan:
+            print("\n" + "="*40)
+            print("GENERATED TEST PLAN")
+            print("="*40 + "\n")
+            print(test_plan)
+            
+            # Optional: Save to file
+            with open("Generated_Test_Plan.md", "w", encoding="utf-8") as f:
+                f.write(test_plan)
+            print("\nSaved to 'Generated_Test_Plan.md'")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Note: Ensure you have set your OPENAI_API_KEY environment variable.")
+
